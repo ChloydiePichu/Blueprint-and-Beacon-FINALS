@@ -1,0 +1,17 @@
+[theme]
+# A professional, trustworthy Indigo/Blue
+primaryColor = "#3B82F6"
+
+# Deep, matte backgrounds (No pitch black)
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#161B22"
+
+# Soft white text to reduce eye strain
+textColor = "#E6EDF3"
+
+# Clean sans-serif font
+font = "sans serif"
+
+[client]
+# Hides the annoying "Deploy" button at the top right safely
+toolbarMode = "minimal"
