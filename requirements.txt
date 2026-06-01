@@ -1,0 +1,9 @@
+streamlit
+pandas
+opencv-python
+mediapipe
+sounddevice
+groq
+crewai
+pypdf
+python-dotenv
