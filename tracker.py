@@ -6,10 +6,10 @@ import numpy as np
 import sounddevice as sd 
 import soundfile as sf 
 import pandas as pd 
-from groq import Groq 
-from crewai import Agent, Task, Crew, Process, LLM 
 import os
 from dotenv import load_dotenv
+from groq import Groq 
+from crewai import Agent, Task, Crew, Process, LLM 
 
 load_dotenv()
 
@@ -210,7 +210,7 @@ def run_live_tracker(max_duration=60):
     ui_state["is_tracking"] = False 
     ui_state["should_stop"] = False 
      
-    return summary, actual_duration, time_series_data 
+    return summary, actual_duration, time_series_data
 
 # ========================================== 
 # 4. AUDIO TRANSCRIPTION 
