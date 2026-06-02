@@ -87,7 +87,35 @@ def run_live_tracker(max_duration=60):
             while True: 
                 ret, frame = cap.read() 
                 if not ret: break 
+                      
+                # 1. ALWAYS RUN THE TRACKER (For Preview)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+                results = holistic.process(rgb_frame) 
+                 
+                status_text = "Focused" 
+                status_color = (0, 255, 0) 
+                focus_score = 100 
+                 
+                # --- FACE TRACKING LOGIC (Runs continuously) --- 
+                if results.face_landmarks: 
+                    nose = results.face_landmarks.landmark[1] 
+                    left_ear = results.face_landmarks.landmark[234] 
+                    right_ear = results.face_landmarks.landmark[454] 
                      
+                    dist_left = abs(nose.x - left_ear.x) 
+                    dist_right = abs(nose.x - right_ear.x) 
+                    ratio = dist_left / (dist_right + 0.0001) 
+                     
+                    if ratio > 3.0 or ratio < 0.33: 
+                        status_text = "Distracted" 
+                        status_color = (0, 0, 255) 
+                        focus_score = 0 
+                else: 
+                    status_text = "Face Not Visible" 
+                    status_color = (0, 0, 255) 
+                    focus_score = 0 
+
+                # 2. ONLY LOG DATA IF PITCH HAS STARTED
                 if ui_state["is_tracking"]: 
                     
                     if not audio_started:
@@ -96,33 +124,10 @@ def run_live_tracker(max_duration=60):
                         audio_started = True
                         
                     total_frames += 1 
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
-                    results = holistic.process(rgb_frame) 
-                     
-                    status_text = "Focused" 
-                    status_color = (0, 255, 0) 
-                    focus_score = 100 
-                     
-                    # --- FACE TRACKING --- 
-                    if results.face_landmarks: 
-                        nose = results.face_landmarks.landmark[1] 
-                        left_ear = results.face_landmarks.landmark[234] 
-                        right_ear = results.face_landmarks.landmark[454] 
-                         
-                        dist_left = abs(nose.x - left_ear.x) 
-                        dist_right = abs(nose.x - right_ear.x) 
-                        ratio = dist_left / (dist_right + 0.0001) 
-                         
-                        if ratio > 3.0 or ratio < 0.33: 
-                            distracted_frames += 1 
-                            status_text = "Distracted" 
-                            status_color = (0, 0, 255) 
-                            focus_score = 0 
-                    else: 
-                        distracted_frames += 1 
-                        status_text = "Face Not Visible" 
-                        status_color = (0, 0, 255) 
-                        focus_score = 0 
+                    
+                    # Update distracted frames only during active recording
+                    if focus_score == 0:
+                        distracted_frames += 1
                      
                     # --- HAND TRACKING --- 
                     if results.right_hand_landmarks: 
@@ -153,20 +158,22 @@ def run_live_tracker(max_duration=60):
                         last_logged_second = current_second 
                         current_second_energy = 0.0 
 
-                    # Draw UI 
-                    cv2.putText(frame, f"Focus: {status_text}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2) 
+                    # Draw Recording UI 
                     time_left = max(0, int(max_duration - elapsed_time)) 
                     cv2.putText(frame, f"Time: {time_left}s", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2) 
+                    cv2.rectangle(frame, (30, 400), (230, 450), (0, 0, 200), -1) 
+                    cv2.putText(frame, "STOP PITCH", (50, 435), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2) 
                      
                     if time_left == 0: ui_state["should_stop"] = True 
 
-                    cv2.rectangle(frame, (30, 400), (230, 450), (0, 0, 200), -1) 
-                    cv2.putText(frame, "STOP PITCH", (50, 435), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2) 
-
                 else: 
-                    cv2.putText(frame, "ELEVATOR PITCH COACH", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 200, 0), 2) 
+                    # Draw Preview UI 
+                    cv2.putText(frame, "SYSTEM STANDBY - PREVIEW", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2) 
                     cv2.rectangle(frame, (30, 400), (230, 450), (0, 200, 0), -1) 
                     cv2.putText(frame, "START PITCH", (45, 435), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2) 
+
+                # 3. ALWAYS DRAW THE FOCUS TEXT OVERLAY
+                cv2.putText(frame, f"Focus: {status_text}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2) 
 
                 cv2.imshow('Elevator Pitch Coach', frame) 
                  
