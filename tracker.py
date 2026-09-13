@@ -23,8 +23,10 @@ groq_client = Groq(api_key=MY_GROQ_KEY)
 import crewai.llms.cache as _crewai_cache 
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg 
 
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "groq/groq/compound-mini")
+
 free_agent_llm = LLM( 
-    model="groq/meta-llama/llama-4-scout-17b-16e-instruct", 
+    model=GROQ_MODEL, 
     api_key=MY_GROQ_KEY, 
     temperature=0.0 
 )
@@ -63,8 +65,11 @@ def run_live_tracker(max_duration=60):
      
     cap = cv2.VideoCapture(1)  
     if not cap.isOpened(): 
-        print("❌ Error: Could not access the webcam.") 
-        return None, 0, None 
+        print("ℹ️ Camera index 1 not available. Falling back to default camera (index 0)...")
+        cap = cv2.VideoCapture(0)
+    if not cap.isOpened(): 
+        print("❌ Error: Could not access any webcam (tested indices 1 and 0).") 
+        return None, 0, None, {} 
      
     cv2.namedWindow('Elevator Pitch Coach') 
     cv2.setMouseCallback('Elevator Pitch Coach', on_mouse_click) 
@@ -189,7 +194,7 @@ def run_live_tracker(max_duration=60):
         sd.stop()  
      
     actual_duration = time.time() - ui_state["start_time"] if ui_state["is_tracking"] else 0 
-    if actual_duration < 2: return None, 0, None 
+    if actual_duration < 2: return None, 0, None, {} 
      
     trimmed_audio = audio_data[:int(actual_duration * AUDIO_SAMPLE_RATE)] 
     sf.write('pitch_audio.wav', trimmed_audio, AUDIO_SAMPLE_RATE) 
@@ -209,8 +214,15 @@ def run_live_tracker(max_duration=60):
      
     ui_state["is_tracking"] = False 
     ui_state["should_stop"] = False 
+
+    telemetry_metrics = {
+        "duration": int(actual_duration),
+        "focus_percentage": round(float(focus_percentage), 1),
+        "gesture_energy": round(float(normalized_energy), 1),
+        "gesture_profile": gesture_profile
+    }
      
-    return summary, actual_duration, time_series_data
+    return summary, actual_duration, time_series_data, telemetry_metrics
 
 # ========================================== 
 # 4. AUDIO TRANSCRIPTION 
@@ -230,86 +242,154 @@ def transcribe_audio(filename="pitch_audio.wav"):
 # 5. MULTI-AGENT ANALYSIS LOOP 
 # ========================================== 
 def run_full_analysis(resume_text=""): 
-    visual_metrics, duration, time_series = run_live_tracker(max_duration=60) 
+    tracker_result = run_live_tracker(max_duration=60) 
      
-    if not visual_metrics: 
-        return "Pitch cancelled or too short.", "", None 
+    if not tracker_result or tracker_result[0] is None: 
+        return "Pitch cancelled or too short.", "", None, {} 
          
+    visual_metrics, duration, time_series, telemetry_metrics = tracker_result
     spoken_text = transcribe_audio() 
      
-    body_language_agent = Agent( 
-        role='Blueprint (Behavioral Analyst)', 
-        goal='Evaluate the candidate\'s visual presence over time.', 
-        backstory='You are the Blueprint analytics engine. You look at second-by-second timeline data to map the exact structural moments a speaker lost focus or became visibly nervous.', 
+    # --- Token-Efficient Telemetry Distillation ---
+    # Instead of sending a massive raw 60-element array that triggers Groq TPM limits,
+    # extract exact seconds of interest so the LLM has timestamp precision with 90% fewer tokens.
+    times = time_series.get("Time (s)", []) if time_series else []
+    focus_vals = time_series.get("Focus (100=Yes, 0=No)", []) if time_series else []
+    energy_vals = time_series.get("Hand Energy (Spikes)", []) if time_series else []
+
+    focus_drops = [t for t, f in zip(times, focus_vals) if f == 0]
+    hand_spikes = [t for t, e in zip(times, energy_vals) if e > 35]
+
+    telemetry_summary = (
+        f"Overall: {visual_metrics}\n"
+        f"- Eye contact lost at seconds: {focus_drops if focus_drops else 'None (consistent focus)'}\n"
+        f"- High hand movement spikes at seconds: {hand_spikes if hand_spikes else 'None (controlled gestures)'}"
+    )
+
+    clean_resume = resume_text[:2000] if resume_text else ""
+
+    # --- Streamlined 2-Agent Crew Architecture ---
+    # Eliminates redundant intermediate calls that exceed Groq's 8K TPM rate limit
+    analyst_agent = Agent( 
+        role='Blueprint (Multi-Modal Analyst)', 
+        goal='Evaluate body language timeline data, spoken clarity, and resume alignment.', 
+        backstory='You are the Blueprint analytics engine. You inspect timestamped behavioral telemetry, spoken pitch transcripts, and background resumes to uncover delivery strengths and missed opportunities.', 
         verbose=True, 
         llm=free_agent_llm 
     ) 
-     
-    content_agent = Agent( 
-        role='Blueprint (Speech Strategist)', 
-        goal='Analyze the transcribed speech for clarity and pacing.', 
-        backstory='You are the Blueprint language engine. You analyze transcripts to outline if the core message is clear, or if the speaker rambled.', 
-        verbose=True, 
-        llm=free_agent_llm 
-    ) 
-     
+
     executive_coach = Agent( 
-        role='Beacon (Executive Presentation Coach)', 
-        goal='Combine all feedback into a final master report.', 
-        backstory='You are Beacon, the coaching engine. You synthesize the structural data from the Blueprint analysts into clear, actionable advice. You give precise timestamps to illuminate mistakes and guide improvement.', 
+        role='Blueprint (Executive Presentation Coach)', 
+        goal='Combine all feedback into a master executive coaching report with required headers.', 
+        backstory='You are the Blueprint executive presentation coach. You transform analytical data into actionable, inspiring advice with exact timestamps to illuminate mistakes and guide improvement.', 
         verbose=True, 
         llm=free_agent_llm 
     ) 
-     
-    t1 = Task( 
-        description=f'Analyze the overall metrics: "{visual_metrics}". Then, review this second-by-second data array: {time_series}. Point out specific timestamps (e.g., "At 15 seconds in...") where they dropped eye contact or had erratic hand spikes.',  
-        expected_output='A timeline-based assessment of their body language.',  
-        agent=body_language_agent 
-    ) 
 
-    t2 = Task(description=f'Analyze this transcribed speech: "{spoken_text}". Did they use their {int(duration)} seconds well?', expected_output='A critique of the spoken content.', agent=content_agent) 
-     
-    crew_agents = [body_language_agent, content_agent] 
-    crew_tasks = [t1, t2] 
-     
-    if resume_text: 
-        resume_agent = Agent( 
-            role='Blueprint (Career Alignment Engine)', 
-            goal='Cross-reference the resume with the spoken pitch.', 
-            backstory='You are the Blueprint context engine. You analyze the foundational layout of a resume to find amazing achievements that the candidate forgot to mention.', 
-            verbose=True, 
-            llm=free_agent_llm 
-        ) 
-        t_resume = Task( 
-            description=f'Compare this resume: "{resume_text}" with this pitch: "{spoken_text}". Identify 1-2 major strengths missed in the pitch.', 
-            expected_output='A short critique detailing missed opportunities.', 
-            agent=resume_agent 
-        ) 
-        crew_agents.append(resume_agent) 
-        crew_tasks.append(t_resume) 
-         
-        t3_desc = ( 
-            'Take the timeline visual assessment, the content critique, and the resume data. ' 
-            'Create a final "Elevator Pitch Master Report". You MUST include these specific headers: ' 
-            '"Strengths", "Weaknesses", "Resume Missed Opportunities", Actionable Insights, and "Top 3 Things to Fix". ' 
+    if clean_resume:
+        t1_desc = (
+            f"Analyze this pitch:\n"
+            f"TELEMETRY TIMELINE:\n{telemetry_summary}\n\n"
+            f"SPOKEN PITCH ({int(duration)}s):\n\"{spoken_text}\"\n\n"
+            f"RESUME CONTEXT:\n\"{clean_resume}\"\n\n"
+            f"Provide a concise analytical breakdown of: (1) body language timestamps where focus dropped or hands spiked, (2) clarity and pacing of speech, and (3) 1-2 major resume strengths missed."
+        )
+        t2_desc = ( 
+            'Take the analytical breakdown and produce a final "# Elevator Pitch Master Report". '
+            'You MUST include these exact headers: ' 
+            '"### Strengths", "### Weaknesses", "### Resume Missed Opportunities", "### Actionable Insights", and "### Top 3 Things to Fix". ' 
             'Include specific timestamps from the timeline data to back up your points.' 
-        ) 
-    else: 
-        t3_desc = ( 
-            'Take the timeline visual assessment and the content critique. ' 
-            'Create a final "Elevator Pitch Master Report". You MUST include these specific headers: ' 
-            '"Strengths", "Weaknesses", Actionable Insights, and "Top 3 Things to Fix". ' 
+        )
+    else:
+        t1_desc = (
+            f"Analyze this pitch:\n"
+            f"TELEMETRY TIMELINE:\n{telemetry_summary}\n\n"
+            f"SPOKEN PITCH ({int(duration)}s):\n\"{spoken_text}\"\n\n"
+            f"Provide a concise analytical breakdown of: (1) body language timestamps where focus dropped or hands spiked, and (2) clarity and pacing of speech."
+        )
+        t2_desc = ( 
+            'Take the analytical breakdown and produce a final "# Elevator Pitch Master Report". '
+            'You MUST include these exact headers: ' 
+            '"### Strengths", "### Weaknesses", "### Actionable Insights", and "### Top 3 Things to Fix". ' 
             'Include specific timestamps from the timeline data to back up your points.' 
-        ) 
+        )
 
-    t3 = Task(description=t3_desc, expected_output='A clean Markdown report.', agent=executive_coach) 
-    crew_agents.append(executive_coach) 
-    crew_tasks.append(t3) 
-     
-    crew = Crew(agents=crew_agents, tasks=crew_tasks, process=Process.sequential) 
-    final_report = crew.kickoff() 
+    t1 = Task(description=t1_desc, expected_output='A consolidated multi-modal assessment.', agent=analyst_agent)
+    t2 = Task(description=t2_desc, expected_output='A clean Markdown master report.', agent=executive_coach)
+
+    crew = Crew(agents=[analyst_agent, executive_coach], tasks=[t1, t2], process=Process.sequential) 
+    
+    # Auto-retry handler for rate limits with backoff
+    final_report = None
+    import re
+    for attempt in range(3):
+        try:
+            final_report = crew.kickoff()
+            break
+        except Exception as e:
+            err_str = str(e)
+            if ("rate_limit" in err_str.lower() or "ratelimit" in err_str.lower() or "429" in err_str) and attempt < 2:
+                wait_sec = 4.5
+                match = re.search(r"try again in ([\d\.]+)s", err_str)
+                if match:
+                    wait_sec = float(match.group(1)) + 1.0
+                print(f"⏳ Rate limit pause: waiting {wait_sec:.1f}s before retry ({attempt+1}/2)...")
+                time.sleep(wait_sec)
+            else:
+                raise e
      
     if os.path.exists("pitch_audio.wav"): 
         os.remove("pitch_audio.wav") 
          
-    return final_report.raw, spoken_text, time_series
+    return final_report.raw, spoken_text, time_series, telemetry_metrics
+
+def get_sample_analysis():
+    """
+    Returns high-quality sample pitch analysis data for instant testing
+    and demoing the Workato -> PongAI -> Jira workflow.
+    """
+    sample_report = """# Elevator Pitch Master Report
+
+### Strengths
+- **Clear Value Proposition**: Succinctly outlined 3+ years of experience building scalable backend microservices and React dashboards.
+- **Strong Eye Contact**: Maintained steady visual focus during technical overview (seconds 10-38).
+- **Concise Delivery**: Delivered a coherent narrative within a 45-second window without filler words.
+
+### Weaknesses
+- **Hand Gesture Spikes**: Noticeable sudden hand movements around 22s-26s when transitioning to cloud architecture topics.
+- **Missed Metric Depth**: Spoke about scaling APIs but did not quantify throughput or latency improvements cited on the resume.
+
+### Resume Missed Opportunities
+- Failed to mention experience with **Kafka streaming** and **PostgreSQL optimization**, which are highlighted as major wins in the uploaded resume.
+
+### Actionable Insights
+1. Practice grounding your hands at waist height when transitioning between project stories.
+2. Weave in quantifiable impacts (e.g., "reduced latency by 35%") directly into your 30-second hook.
+
+### Top 3 Things to Fix
+1. Anchor your hands during transitions (seconds 20-25).
+2. State your target role immediately in the opening 5 seconds.
+3. Reference your Kafka distributed systems experience.
+"""
+    sample_transcript = (
+        "Hi, I'm Alex Johnson, a full-stack engineer with 4 years of experience building scalable web applications "
+        "and distributed backend systems in Python, FastAPI, and React. Recently, I led the migration of a monolithic API "
+        "to microservices deployed on Kubernetes, which cut infrastructure costs and improved system resilience. "
+        "I thrive in collaborative agile teams, turning complex product specs into reliable, well-tested code, "
+        "and I'm excited to contribute to high-impact software projects."
+    )
+    
+    sample_time_series = {
+        "Time (s)": list(range(1, 46)),
+        "Focus (100=Yes, 0=No)": [100 if i not in (22, 23, 24) else 0 for i in range(1, 46)],
+        "Hand Energy (Spikes)": [12 if i not in (21, 22, 23, 24, 25) else 55 for i in range(1, 46)]
+    }
+    
+    sample_telemetry = {
+        "duration": 45,
+        "focus_percentage": 93.3,
+        "gesture_energy": 18.5,
+        "gesture_profile": "active and expressive"
+    }
+    
+    return sample_report, sample_transcript, sample_time_series, sample_telemetry
